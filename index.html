@@ -591,7 +591,8 @@
             let pitchesToApply = [];
             let durations = []; // Actual calculated play duration (D_play)
             let nominalDurations = []; // Original buffer duration (D_orig)
-            
+            let totalDuration = 0; // FIX: Declare totalDuration locally
+
             const basePitch = parseFloat(document.getElementById('pitch-slider').value);
             const pitchRange = parseFloat(document.getElementById('pitch-variation').value);
             const pauseMs = parseInt(document.getElementById('pause-slider').value, 10);
@@ -648,7 +649,7 @@
                     const fallbackBuffer = state.audioBuffers[state.defaultPhoneme];
                     if (fallbackBuffer) {
                          buffer = fallbackBuffer;
-                         nominalDuration = buffer.duration;
+                         nominalDuration = fallbackBuffer.duration; // Use fallback's duration
                          segmentDuration = nominalDuration / pitch;
                          phonemesUsed[phonemesUsed.length - 1] += ' (Fallback)';
                     }
@@ -687,8 +688,11 @@
             const chorusValue = parseFloat(document.getElementById('chorus-slider').value);
             const reverbValue = parseFloat(document.getElementById('reverb-slider').value);
             
-            let lastNode = inputNode;
-            
+            // Gain node to handle the final mix before destination
+            const finalMixer = context.createGain();
+            finalMixer.gain.setValueAtTime(1.0, startTime);
+            let lastNode = inputNode; // Start of the chain
+
             // --- 1. Low-Pass Filter (LPF) ---
             if (lpfValue < 20000) {
                 const lpf = context.createBiquadFilter();
@@ -723,17 +727,17 @@
                 lastNode.connect(chorusDelay);
                 chorusDelay.connect(wetGain);
                 
-                // Mix wet and dry signals
-                const mixer = context.createGain();
+                // Mix wet and dry signals into the final mixer
                 lastNode.connect(dryGain);
-                dryGain.connect(mixer);
-                wetGain.connect(mixer);
+                dryGain.connect(finalMixer);
+                wetGain.connect(finalMixer);
 
                 // Start LFO
                 lfo.start(startTime);
                 lfo.stop(endTime);
 
-                lastNode = mixer;
+                // Since we connected to finalMixer, we return the mixer for the rest of the chain
+                return finalMixer;
             }
 
             // --- 3. Reverb/Delay Effect (Simple Delay) ---
@@ -757,18 +761,20 @@
                 delayNode.connect(feedbackGain);
                 feedbackGain.connect(delayNode); 
                 
-                // Mix wet and dry signals
-                const mixer = context.createGain();
+                // Mix wet and dry signals into the final mixer
                 lastNode.connect(dryGain);
-                dryGain.connect(mixer);
+                dryGain.connect(finalMixer);
 
                 delayNode.connect(wetGain);
-                wetGain.connect(mixer);
-
-                lastNode = mixer;
+                wetGain.connect(finalMixer);
+                
+                // Since we connected to finalMixer, we return the mixer for the rest of the chain
+                return finalMixer;
             }
-            
-            return lastNode;
+
+            // If no complex effects were used, just connect the last sequential node to the final mixer
+            lastNode.connect(finalMixer);
+            return finalMixer;
         }
 
 
