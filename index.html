@@ -622,8 +622,9 @@
                 }
                 else if (isGibberish) {
                     // 1. Animalese style: Map the phoneme key to a sound from the pool
-                    const charCode = phonemeKey.charCodeAt(0);
-                    const soundIndex = charCode % availablePhonemeKeys.length;
+                    // Use a simple hash based on the first character for consistent mapping
+                    const charToHash = phonemeKey[0]; 
+                    const soundIndex = charToHash.charCodeAt(0) % availablePhonemeKeys.length;
                     buffer = state.audioBuffers[availablePhonemeKeys[soundIndex]];
 
                     // 2. Apply random pitch variation (Animalese effect)
@@ -664,8 +665,6 @@
             let finalEndTime = 0;
 
             for (let i = 0; i < buffersToPlay.length; i++) {
-                // If it's a sound, the end time is current time + its actual play duration
-                // If it's a pause, the end time is current time + its pause duration
                 finalEndTime = currentTime + durations[i];
 
                 if (i < buffersToPlay.length - 1) {
@@ -679,106 +678,97 @@
         }
 
         /**
-         * Creates and configures the Web Audio API effect chain (LPF -> Chorus -> Reverb -> Destination).
-         * @param {AudioContext | OfflineAudioContext} context - The audio context to use.
-         * @param {AudioNode} sourceNode - The node where the audio enters the chain.
-         * @param {AudioNode} destinationNode - The final destination (Context destination or Recorder).
-         * @param {number} startTime - The time the source starts.
-         * @param {number} endTime - The time the source ends.
-         * @returns {AudioNode} The node where the audio exits the effects chain (before connecting to destination).
+         * Creates and configures the Web Audio API effect chain (LPF -> Chorus -> Reverb).
+         * Returns the final node in the chain for connection to the context destination.
          */
-        function applyEffectsChain(context, sourceNode, destinationNode, startTime, endTime) {
+        function buildEffectsChain(context, inputNode, startTime, endTime) {
             
-            // Get slider values
             const lpfValue = parseFloat(document.getElementById('lpf-slider').value);
             const chorusValue = parseFloat(document.getElementById('chorus-slider').value);
             const reverbValue = parseFloat(document.getElementById('reverb-slider').value);
             
-            let lastNode = sourceNode;
-
+            let lastNode = inputNode;
+            
             // --- 1. Low-Pass Filter (LPF) ---
             if (lpfValue < 20000) {
                 const lpf = context.createBiquadFilter();
                 lpf.type = 'lowpass';
-                lpf.frequency.setValueAtTime(lpfValue, context.currentTime);
+                lpf.frequency.setValueAtTime(lpfValue, startTime);
                 lastNode.connect(lpf);
                 lastNode = lpf;
             }
             
             // --- 2. Chorus Effect (Simple delay modulation) ---
             if (chorusValue > 0.0) {
-                const chorusDelay = context.createDelay(1.0);
-                chorusDelay.delayTime.setValueAtTime(0.02 * chorusValue, startTime); // Base delay: 20ms * depth
+                const dryGain = context.createGain();
+                dryGain.gain.setValueAtTime(1.0, startTime);
+                
+                const wetGain = context.createGain();
+                wetGain.gain.setValueAtTime(0.5 * chorusValue, startTime);
+
+                const chorusDelay = context.createDelay(0.1); // Max delay time
                 
                 // LFO (Low-Frequency Oscillator) for modulation
                 const lfo = context.createOscillator();
+                lfo.type = 'sine';
                 lfo.frequency.setValueAtTime(5, startTime); // 5 Hz modulation rate
                 
-                const gainNode = context.createGain();
-                gainNode.gain.setValueAtTime(0.005 * chorusValue, startTime); // Modulation depth
-                
-                lfo.connect(gainNode);
-                gainNode.connect(chorusDelay.delayTime);
+                const modulationDepth = context.createGain();
+                modulationDepth.gain.setValueAtTime(0.01 * chorusValue, startTime); // Modulation depth
 
-                // Mix the wet signal (delayed) with the dry signal (lastNode)
-                const merger = context.createChannelMerger(2);
+                // Connections
+                lfo.connect(modulationDepth);
+                modulationDepth.connect(chorusDelay.delayTime);
+
+                lastNode.connect(chorusDelay);
+                chorusDelay.connect(wetGain);
                 
-                lastNode.connect(chorusDelay); // Dry signal to delay
-                lastNode.connect(merger, 0, 0); // Dry signal to merger (left)
-                lastNode.connect(merger, 0, 1); // Dry signal to merger (right)
-                
-                chorusDelay.connect(merger, 0, 0); // Wet signal to merger (left)
-                chorusDelay.connect(merger, 0, 1); // Wet signal to merger (right)
+                // Mix wet and dry signals
+                const mixer = context.createGain();
+                lastNode.connect(dryGain);
+                dryGain.connect(mixer);
+                wetGain.connect(mixer);
 
                 // Start LFO
                 lfo.start(startTime);
                 lfo.stop(endTime);
 
-                lastNode.connect(chorusDelay);
-                lastNode.connect(destinationNode); // Dry path
-                chorusDelay.connect(destinationNode); // Wet path
-
-                lastNode = destinationNode; // Note: This structure bypasses standard single-path chaining
-                return destinationNode;
+                lastNode = mixer;
             }
 
             // --- 3. Reverb/Delay Effect (Simple Delay) ---
             if (reverbValue > 0.0) {
-                const delayNode = context.createDelay(1.0);
+                const delayNode = context.createDelay(0.5); // 500ms max delay
                 const feedbackGain = context.createGain();
-                const outputGain = context.createGain(); // Wet signal gain
-                const dryGain = context.createGain(); // Dry signal gain
+                const wetGain = context.createGain();
+                const dryGain = context.createGain();
 
                 const delayTime = 0.3 * reverbValue; // Max 300ms delay
                 const feedbackAmount = 0.5 * reverbValue; // Max 50% feedback
-                const wetMix = 0.5 * reverbValue; // Max 50% wet mix
+                const wetMix = reverbValue; // Full range for wet mix
 
                 delayNode.delayTime.setValueAtTime(delayTime, startTime);
                 feedbackGain.gain.setValueAtTime(feedbackAmount, startTime);
-                outputGain.gain.setValueAtTime(wetMix, startTime);
+                wetGain.gain.setValueAtTime(wetMix, startTime);
                 dryGain.gain.setValueAtTime(1.0, startTime);
 
                 // Delay signal path: lastNode -> delay -> feedback -> delay
                 lastNode.connect(delayNode);
                 delayNode.connect(feedbackGain);
                 feedbackGain.connect(delayNode); 
-
-                // Wet output: delay -> outputGain -> destination
-                delayNode.connect(outputGain);
-                outputGain.connect(destinationNode);
-
-                // Dry output: lastNode -> dryGain -> destination
-                lastNode.connect(dryGain);
-                dryGain.connect(destinationNode);
                 
-                lastNode = destinationNode; // Final output goes to destination
-                return destinationNode;
+                // Mix wet and dry signals
+                const mixer = context.createGain();
+                lastNode.connect(dryGain);
+                dryGain.connect(mixer);
+
+                delayNode.connect(wetGain);
+                wetGain.connect(mixer);
+
+                lastNode = mixer;
             }
-
-
-            // If no complex effects (Chorus/Reverb) are used, connect the last node directly.
-            lastNode.connect(destinationNode);
-            return destinationNode;
+            
+            return lastNode;
         }
 
 
@@ -842,8 +832,9 @@
                 const gainNode = context.createGain();
                 source.connect(gainNode);
                 
-                // 3. Connect to the Effects Chain
-                applyEffectsChain(context, gainNode, context.destination, currentTime, currentTime + segmentDuration);
+                // 3. Build the Effects Chain
+                const finalEffectNode = buildEffectsChain(context, gainNode, currentTime, currentTime + segmentDuration);
+                finalEffectNode.connect(context.destination);
 
                 // 4. Pitch and Start
                 source.playbackRate.value = pitch;
@@ -957,7 +948,8 @@
                     
                     // 3. Connect to the Effects Chain
                     // The result of the chain connects to the offlineContext.destination
-                    applyEffectsChain(offlineContext, gainNode, offlineContext.destination, currentTime, currentTime + segmentDuration);
+                    const finalEffectNode = buildEffectsChain(offlineContext, gainNode, currentTime, currentTime + segmentDuration);
+                    finalEffectNode.connect(offlineContext.destination);
 
                     // 4. Pitch and Start
                     source.playbackRate.value = pitch;
@@ -987,11 +979,7 @@
                         gainNode.gain.linearRampToValueAtTime(0, currentTime + 0.01);
                     }
                     
-                    // 6. Crossfade Overlap (managed by simply starting the next sound early)
-                    // We only manage crossfade by controlling the start time of the NEXT segment.
-                    // The volume envelope handles the smooth exit of the CURRENT segment (Release).
-                    
-                    // 7. Calculate start time for the next sound (if not the last)
+                    // 6. Calculate start time for the next sound (if not the last)
                     if (index < buffersToPlay.length - 1) {
                         currentTime = calculateNextStartTime(currentTime, index, buffersToPlay, pitchesToApply, nominalDurations, durations, delaySeconds, crossfadeSeconds);
                     }
@@ -1031,37 +1019,26 @@
             const preset = PRESETS[presetKey];
             if (!preset) return;
 
-            // Update sliders and value displays
-            document.getElementById('pitch-slider').value = preset.pitch;
-            document.getElementById('pitch-value').textContent = preset.pitch;
+            // Helper to update slider and display value
+            const updateSlider = (id, value) => {
+                const slider = document.getElementById(id);
+                if (slider) {
+                    slider.value = value;
+                    const display = document.getElementById(`${id.replace('-slider', '')}-value`);
+                    if (display) display.textContent = value;
+                }
+            };
 
-            document.getElementById('delay-slider').value = preset.delay;
-            document.getElementById('delay-value').textContent = preset.delay;
-
-            document.getElementById('crossfade-slider').value = preset.crossfade;
-            document.getElementById('crossfade-value').textContent = preset.crossfade;
-
-            document.getElementById('pause-slider').value = preset.pause;
-            document.getElementById('pause-value').textContent = preset.pause;
-
-            document.getElementById('attack-slider').value = preset.attack;
-            document.getElementById('attack-value').textContent = preset.attack;
-            
-            document.getElementById('release-slider').value = preset.release;
-            document.getElementById('release-value').textContent = preset.release;
-
-            document.getElementById('pitch-variation').value = preset.variation;
-            document.getElementById('variation-value').textContent = preset.variation;
-            
-            // New FX sliders
-            document.getElementById('lpf-slider').value = preset.lpf;
-            document.getElementById('lpf-value').textContent = preset.lpf;
-            
-            document.getElementById('chorus-slider').value = preset.chorus;
-            document.getElementById('chorus-value').textContent = preset.chorus;
-            
-            document.getElementById('reverb-slider').value = preset.reverb;
-            document.getElementById('reverb-value').textContent = preset.reverb;
+            updateSlider('pitch-slider', preset.pitch);
+            updateSlider('delay-slider', preset.delay);
+            updateSlider('crossfade-slider', preset.crossfade);
+            updateSlider('pause-slider', preset.pause);
+            updateSlider('attack-slider', preset.attack);
+            updateSlider('release-slider', preset.release);
+            updateSlider('pitch-variation', preset.variation);
+            updateSlider('lpf-slider', preset.lpf);
+            updateSlider('chorus-slider', preset.chorus);
+            updateSlider('reverb-slider', preset.reverb);
 
 
             showMessage(`Preset "${presetKey.toUpperCase()}" loaded.`);
