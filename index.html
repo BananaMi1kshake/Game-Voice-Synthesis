@@ -1,0 +1,1201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Custom Game Voice Synthesizer</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap');
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f7f7f7;
+        }
+        .container {
+            max-width: 900px;
+        }
+        .synth-card {
+            background: #ffffff;
+            border-radius: 16px;
+            box-shadow: 0 10px 20px rgba(0, 0, 0, 0.05);
+            padding: 24px;
+        }
+        .btn {
+            padding: 10px 20px;
+            border-radius: 8px;
+            font-weight: 600;
+            white-space: nowrap;
+        }
+        .btn-primary {
+            background-color: #4f46e5;
+            color: white;
+            transition: all 0.2s;
+        }
+        .btn-primary:hover {
+            background-color: #4338ca;
+            box-shadow: 0 4px 6px rgba(79, 70, 229, 0.3);
+        }
+        .btn-secondary {
+            background-color: #f3f4f6;
+            color: #1f2937;
+            transition: all 0.2s;
+        }
+        .btn-secondary:hover {
+            background-color: #e5e7eb;
+        }
+        input[type="text"], input[type="number"], textarea {
+            border: 1px solid #d1d5db;
+            border-radius: 8px;
+            padding: 10px;
+            width: 100%;
+            transition: border-color 0.2s;
+        }
+        input:focus, textarea:focus {
+            border-color: #4f46e5;
+            outline: none;
+        }
+        details > summary {
+            list-style: none;
+            cursor: pointer;
+            padding: 10px 0;
+        }
+        details > summary::-webkit-details-marker {
+            display: none;
+        }
+        .summary-arrow::after {
+            content: '▼';
+            float: right;
+            transition: transform 0.2s;
+        }
+        details[open] .summary-arrow::after {
+            transform: rotate(180deg);
+        }
+        .phoneme-row {
+            display: grid;
+            grid-template-columns: 80px 1fr auto;
+            gap: 16px;
+            align-items: center;
+            padding: 8px 0;
+            border-bottom: 1px dashed #e5e7eb;
+        }
+        .phoneme-row:last-child {
+            border-bottom: none;
+        }
+        .status-chip {
+            padding: 2px 8px;
+            border-radius: 9999px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            text-align: center;
+        }
+        .guide-box {
+            background-color: #f9f9ff;
+            border-left: 4px solid #4f46e5;
+            padding: 1rem;
+            border-radius: 4px;
+            margin-bottom: 1rem;
+        }
+        .guide-box ul {
+            list-style-type: disc;
+            padding-left: 1.5rem;
+        }
+    </style>
+    <script type="module">
+        
+        // Application State
+        const state = {
+            phonemeMap: {}, // Stores {'K': Base64String, 'S': Base64String, ...}
+            audioContext: null,
+            audioBuffers: {}, // Stores {'K': AudioBuffer, 'S': AudioBuffer, ...}
+            // Global flag to prevent multiple concurrent generations/plays
+            isProcessing: false,
+            defaultPhoneme: 'A', // Fallback phoneme key
+        };
+
+        // --- Phoneme Definition (Used to dynamically build the UI) ---
+        const PHONEME_GROUPS = [
+            {
+                title: "Vowels (Essential)",
+                keys: [
+                    { key: 'A', example: 'c**a**t', description: 'Short "a" sound (/æ/)' },
+                    { key: 'E', example: 'b**e**d', description: 'Short "e" sound (/ɛ/)' },
+                    { key: 'I', example: 'h**i**t', description: 'Short "i" sound (/ɪ/)' },
+                    { key: 'O', example: 'h**o**t', description: 'Short "o" sound (/ɒ/)' },
+                    { key: 'AH', example: 'c**u**t', description: 'Schwa "uh" sound (/ʌ/)' },
+                ]
+            },
+            {
+                title: "Long Vowels & Diphthongs",
+                keys: [
+                    { key: 'AE', example: 'b**a**ke', description: 'Long "a" sound (/eɪ/)' },
+                    { key: 'IY', example: 's**ee**', description: 'Long "e" sound (/iː/)' },
+                    { key: 'AY', example: 'b**i**ke', description: 'Long "i" sound (/aɪ/)' },
+                    { key: 'OW', example: 'b**oa**t', description: 'Long "o" sound (/oʊ/)' },
+                    { key: 'UW', example: 'bl**ue**', description: 'Long "u" sound (/uː/)' },
+                ]
+            },
+            {
+                title: "Consonants & Digraphs",
+                keys: [
+                    { key: 'B', example: '**b**at', description: 'Crisp "buh" sound (/b/)' },
+                    { key: 'D', example: '**d**og', description: 'Crisp "duh" sound (/d/)' },
+                    { key: 'F', example: '**f**an', description: 'Sustained "fff" sound (/f/)' },
+                    { key: 'G', example: '**g**o', description: 'Hard "g" sound (/g/)' },
+                    { key: 'H', example: '**h**at', description: 'Exhale sound (/h/)' },
+                    { key: 'J', example: '**j**ump', description: 'Soft "g" or "j" sound (/dʒ/)' },
+                    { key: 'K', example: '**k**it', description: 'Hard "c" or "k" sound (/k/)' },
+                    { key: 'L', example: '**l**eg', description: 'Liquid "l" sound (/l/)' },
+                    { key: 'M', example: '**m**an', description: 'Sustained "mmm" sound (/m/)' },
+                    { key: 'N', example: '**n**o', description: 'Sustained "nnn" sound (/n/)' },
+                    { key: 'P', example: '**p**en', description: 'Crisp "p" sound (/p/)' },
+                    { key: 'R', example: '**r**ed', description: 'The "rrr" sound (/r/)' },
+                    { key: 'S', example: '**s**ee', description: 'Soft "c" or "s" sound (/s/)' },
+                    { key: 'T', example: '**t**op', description: 'Crisp "tuh" sound (/t/)' },
+                    { key: 'V', example: '**v**et', description: 'Sustained "vvv" sound (/v/)' },
+                    { key: 'W', example: '**w**in', description: 'The "wuh" sound (/w/)' },
+                    { key: 'Y', example: '**y**es', description: 'The "yuh" sound (/j/)' },
+                    { key: 'Z', example: '**z**oo', description: 'Sustained "zzz" sound (/z/)' },
+                    { key: 'CH', example: '**ch**ip', description: 'The "ch" sound (/tʃ/)' },
+                    { key: 'SH', example: '**sh**ip', description: 'The "sh" sound (/ʃ/)' },
+                    { key: 'TH', example: '**th**in', description: 'Voiceless "th" sound (/θ/)' },
+                    { key: 'NG', example: 'si**ng**', description: 'The "ng" sound (/ŋ/)' },
+                ]
+            },
+            {
+                title: "Control Phonemes (Generated)",
+                keys: [
+                    { key: '_PAUSE_', example: '**., ?**', description: 'Automatically inserted for punctuation.' },
+                ]
+            }
+        ];
+
+        // --- Utility Functions ---
+
+        /** Display a temporary message to the user. */
+        function showMessage(message, isError = false) {
+            const statusEl = document.getElementById('status-message');
+            statusEl.textContent = message;
+            statusEl.className = isError 
+                ? 'text-red-600 font-bold' 
+                : 'text-green-600 font-bold';
+            setTimeout(() => {
+                statusEl.textContent = 'Ready.';
+                statusEl.className = 'text-gray-500 italic';
+            }, 5000);
+        }
+
+        /** Updates the visual status chip for a phoneme. */
+        function updatePhonemeStatus(key, isLoaded) {
+            const statusEl = document.getElementById(`status-${key}`);
+            if (statusEl) {
+                if (isLoaded) {
+                    statusEl.textContent = 'READY';
+                    statusEl.className = 'status-chip bg-green-100 text-green-700';
+                } else {
+                    statusEl.textContent = 'MISSING';
+                    statusEl.className = 'status-chip bg-red-100 text-red-700';
+                }
+            }
+        }
+
+        /** Converts Base64 audio string to an ArrayBuffer. */
+        function base64ToArrayBuffer(base64) {
+            try {
+                const binaryString = atob(base64);
+                const len = binaryString.length;
+                const bytes = new Uint8Array(len);
+                for (let i = 0; i < len; i++) {
+                    bytes[i] = binaryString.charCodeAt(i);
+                }
+                return bytes.buffer;
+            } catch (e) {
+                console.error("Base64 decoding error:", e);
+                return null;
+            }
+        }
+
+        /** Decodes an ArrayBuffer into an AudioBuffer using the AudioContext. */
+        async function decodeAudio(arrayBuffer) {
+            if (!state.audioContext) {
+                state.audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            }
+            try {
+                return await state.audioContext.decodeAudioData(arrayBuffer.slice(0)); // Use a slice to ensure detach protection
+            } catch (e) {
+                console.error("Error decoding audio data:", e);
+                return null;
+            }
+        }
+        
+        // --- WAV Generation Logic (Based on standard WAV file header structure) ---
+        
+        function bufferToWav(audioBuffer) {
+            const numOfChan = audioBuffer.numberOfChannels;
+            const length = audioBuffer.length * numOfChan * 2 + 44; // Total size of file
+            const buffer = new ArrayBuffer(length);
+            const view = new DataView(buffer);
+            const channels = [];
+            let i, sample;
+            let offset = 0;
+            let pos = 0;
+
+            // Write WAV file header
+            function setUint32(data) { view.setUint32(pos, data, true); pos += 4; }
+            function setUint16(data) { view.setUint16(pos, data, true); pos += 2; }
+            function setUint8(data) { view.setUint8(pos, data); pos += 1; }
+            function setString(str) { for (let i = 0; i < str.length; i++) setUint8(str.charCodeAt(i)); }
+
+            // RIFF chunk descriptor
+            setString('RIFF');
+            setUint32(length - 8); // total size of file minus 8
+            setString('WAVE');
+
+            // fmt sub-chunk
+            setString('fmt ');
+            setUint32(16); // sub-chunk size = 16 (for PCM)
+            setUint16(1); // audio format (1 is PCM)
+            setUint16(numOfChan); // number of channels
+            setUint32(audioBuffer.sampleRate); // sample rate
+            setUint32(audioBuffer.sampleRate * numOfChan * 2); // byte rate
+            setUint16(numOfChan * 2); // block align
+            setUint16(16); // bits per sample
+
+            // data sub-chunk
+            setString('data');
+            setUint32(length - pos - 4); // data chunk size
+
+            // write the PCM data
+            for (i = 0; i < audioBuffer.numberOfChannels; i++) {
+                channels.push(audioBuffer.getChannelData(i));
+            }
+
+            while (pos < length) {
+                for (i = 0; i < numOfChan; i++) {
+                    // convert float audio data to 16-bit integer
+                    sample = Math.max(-1, Math.min(1, channels[i][offset]));
+                    sample = sample < 0 ? sample * 0x8000 : sample * 0x7FFF;
+                    view.setInt16(pos, sample, true);
+                    pos += 2;
+                }
+                offset++;
+            }
+
+            return new Blob([buffer], { type: 'audio/wav' });
+        }
+
+
+        // --- Local Storage Management ---
+
+        const PHONEME_STORAGE_KEY = 'custom_phoneme_map';
+
+        function loadPhonemeMapFromLocal() {
+            try {
+                const storedMap = localStorage.getItem(PHONEME_STORAGE_KEY);
+                return storedMap ? JSON.parse(storedMap) : {};
+            } catch (e) {
+                console.error("Error loading phonemes from local storage:", e);
+                return {};
+            }
+        }
+
+        function savePhonemeMapToLocal(map) {
+            try {
+                localStorage.setItem(PHONEME_STORAGE_KEY, JSON.stringify(map));
+            } catch (e) {
+                showMessage("Error saving phoneme to local storage.", true);
+            }
+        }
+        
+        // --- Import/Export Functionality ---
+
+        function exportPhonemeMap() {
+            if (Object.keys(state.phonemeMap).length === 0) {
+                showMessage("Nothing to export. Upload some sounds first!", true);
+                return;
+            }
+            const json = JSON.stringify(state.phonemeMap, null, 2);
+            const blob = new Blob([json], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `voice_library_${new Date().toISOString().slice(0, 10)}.json`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+            showMessage("Phoneme library exported successfully!");
+        }
+
+        function importPhonemeMap(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            if (file.type !== 'application/json') {
+                showMessage("Invalid file type. Please upload a JSON file.", true);
+                return;
+            }
+
+            const reader = new FileReader();
+            reader.onload = async (e) => {
+                try {
+                    const importedMap = JSON.parse(e.target.result);
+                    // Basic validation to ensure the imported data looks like a phoneme map
+                    if (typeof importedMap === 'object' && Object.values(importedMap).every(v => typeof v === 'string')) {
+                        state.phonemeMap = importedMap;
+                        savePhonemeMapToLocal(importedMap);
+                        await processPhonemeMap(importedMap);
+                        showMessage("Phoneme library imported and ready!");
+                    } else {
+                        showMessage("Import failed: JSON structure is invalid.", true);
+                    }
+                } catch (error) {
+                    showMessage(`Import Error: ${error.message}`, true);
+                    console.error("Import Error:", error);
+                }
+            };
+            reader.readAsText(file);
+        }
+
+        async function initializePhonemes() {
+            state.phonemeMap = loadPhonemeMapFromLocal();
+            await processPhonemeMap(state.phonemeMap);
+        }
+
+        async function processPhonemeMap(map) {
+            state.audioBuffers = {};
+            const keys = Object.keys(map);
+
+            let loadedCount = 0;
+
+            // Decode all audio files into buffers
+            PHONEME_GROUPS.forEach(group => {
+                group.keys.forEach(({ key }) => {
+                    const base64 = map[key];
+                    if (base64) {
+                        const arrayBuffer = base64ToArrayBuffer(base64);
+                        if (arrayBuffer) {
+                            decodeAudio(arrayBuffer).then(audioBuffer => {
+                                if (audioBuffer) {
+                                    state.audioBuffers[key.toUpperCase()] = audioBuffer;
+                                    loadedCount++;
+                                }
+                                updatePhonemeStatus(key, !!state.audioBuffers[key]);
+                                document.getElementById('available-phonemes').textContent = `${loadedCount} phonemes ready.`;
+                            });
+                        }
+                    } else {
+                         // Update UI status for every phoneme key
+                        updatePhonemeStatus(key, !!state.audioBuffers[key]);
+                    }
+                });
+            });
+            
+            // Initial status update
+            document.getElementById('available-phonemes').textContent = `${loadedCount} phonemes ready.`;
+        }
+        
+        // --- Upload Handler ---
+
+        async function handleUpload(phonemeKey) {
+            if (state.isProcessing) {
+                showMessage("Please wait for the current operation to finish.", true);
+                return;
+            }
+            state.isProcessing = true;
+            
+            const key = phonemeKey.toUpperCase();
+            const fileInput = document.getElementById(`file-${key}`);
+            
+            const file = fileInput.files[0];
+
+            if (!file) {
+                showMessage(`Please select an audio file for key '${key}'.`, true);
+                state.isProcessing = false;
+                return;
+            }
+            
+            showMessage(`Processing sound for '${key}'...`, false);
+
+
+            const reader = new FileReader();
+            reader.onload = async (e) => {
+                try {
+                    // Convert ArrayBuffer to Base64
+                    const base64 = btoa(new Uint8Array(e.target.result).reduce((data, byte) => data + String.fromCharCode(byte), ''));
+                    
+                    // Update state and local storage
+                    state.phonemeMap[key] = base64;
+                    savePhonemeMapToLocal(state.phonemeMap);
+                    
+                    // Re-process map to update audio buffers and UI
+                    await processPhonemeMap(state.phonemeMap);
+
+                    showMessage(`Sound assigned to phoneme key '${key}' and ready!`);
+                } catch (error) {
+                    showMessage(`Error processing file: ${error.message}`, true);
+                } finally {
+                    state.isProcessing = false;
+                }
+            };
+            
+            reader.onerror = () => {
+                showMessage('File read error.', true);
+                state.isProcessing = false;
+            };
+            reader.readAsArrayBuffer(file);
+        }
+
+        // --- Grapheme-to-Phoneme (G2P) Conversion ---
+
+        /**
+         * Simple rule-based Grapheme-to-Phoneme approximation for choppy TTS.
+         * Inserts _PAUSE_ for punctuation.
+         * @param {string} text - The input text (e.g., "CATS.").
+         * @returns {string[]} An array of phoneme keys (e.g., ["K", "A", "T", "S", "_PAUSE_"]).
+         */
+        function simpleG2P(text) {
+            const result = [];
+            let cleanText = text.replace(/[^a-zA-Z0-9\s.,?!]/g, '').toUpperCase();
+            
+            // Insert PAUSE marker before processing for G2P
+            cleanText = cleanText.replace(/([.,?!])/g, ' $1 ');
+            
+            const wordsAndPunctuation = cleanText.split(/\s+/).filter(Boolean); // Split by space, remove empty
+
+            wordsAndPunctuation.forEach(part => {
+                if (['.', ',', '?', '!'].includes(part)) {
+                    // This is a pause marker
+                    result.push('_PAUSE_');
+                } else {
+                    // Process the word (graphemes)
+                    let t = part;
+                    let i = 0;
+                    
+                    // Longer phonemes first
+                    const complexPhonemes = {
+                        'SH': 'SH', 'CH': 'CH', 'TH': 'TH', 'PH': 'F', 'QU': 'KW', 
+                        'OO': 'OO', 'EE': 'IY', 'IE': 'IY', 'AI': 'AY', 'AY': 'AY', 
+                        'OW': 'OW', 'OU': 'AW', 'AU': 'AO', 'OI': 'OY', 'OY': 'OY',
+                        'ER': 'ER', 'NG': 'NG', 'TCH': 'CH'
+                    };
+
+                    while (i < t.length) {
+                        let found = false;
+
+                        // Check for 3-letter, 2-letter, and 1-letter sequences
+                        for (let len = Math.min(3, t.length - i); len >= 1; len--) {
+                            const slice = t.substring(i, i + len);
+                            
+                            if (complexPhonemes[slice]) {
+                                result.push(complexPhonemes[slice]);
+                                i += len;
+                                found = true;
+                                break;
+                            }
+
+                            // Special handling for C and G (soft/hard rule approximation)
+                            if (len === 1) {
+                                if (slice === 'C') {
+                                    if (t[i+1] && ['E', 'I', 'Y'].includes(t[i+1])) {
+                                        result.push('S'); 
+                                    } else {
+                                        result.push('K');
+                                    }
+                                    i++;
+                                    found = true;
+                                    break;
+                                } else if (slice === 'G') {
+                                    if (t[i+1] && ['E', 'I', 'Y'].includes(t[i+1])) {
+                                        result.push('J'); 
+                                    } else {
+                                        result.push('G');
+                                    }
+                                    i++;
+                                    found = true;
+                                    break;
+                                } else if (slice === 'X') {
+                                    result.push('K');
+                                    result.push('S');
+                                    i++;
+                                    found = true;
+                                    break;
+                                }
+                            }
+                        }
+
+                        // If no complex phoneme or special rule matched, just treat it as a single letter
+                        if (!found) {
+                            const char = t[i];
+                            if (/[A-Z]/.test(char)) {
+                                result.push(char);
+                            }
+                            i++;
+                        }
+                    }
+                }
+            });
+            return result.filter(p => p && p !== ' '); // Filter out any errant spaces
+        }
+
+        /**
+         * Core function to generate the sequence of buffers and pitches based on input.
+         * Returns { buffersToPlay, pitchesToApply, totalDuration, phonemesUsed }
+         */
+        function generateAudioSequence(isGibberish) {
+            const sentence = document.getElementById('input-sentence').value.trim().toUpperCase();
+            if (!sentence) return { error: "Please enter some text." };
+            if (Object.keys(state.audioBuffers).length === 0) return { error: "No sounds available! Please upload an audio file first." };
+
+            // Convert sentence to phoneme sequence
+            const phonemes = simpleG2P(sentence);
+            
+            let buffersToPlay = [];
+            let pitchesToApply = [];
+            let durations = [];
+            
+            const basePitch = parseFloat(document.getElementById('pitch-slider').value);
+            const pitchRange = parseFloat(document.getElementById('pitch-variation').value);
+            
+            const delayMs = parseInt(document.getElementById('delay-slider').value, 10);
+            const pauseMs = parseInt(document.getElementById('pause-slider').value, 10); // NEW
+            const crossfadeMs = parseInt(document.getElementById('crossfade-slider').value, 10);
+            
+            const delaySeconds = delayMs / 1000;
+            const crossfadeSeconds = crossfadeMs / 1000; 
+
+            
+            let totalDuration = 0;
+            let phonemesUsed = [];
+
+            // A list of all available phoneme buffer keys
+            const availablePhonemeKeys = Object.keys(state.audioBuffers);
+            
+            for (const phonemeKey of phonemes) {
+                let buffer;
+                let pitch = basePitch;
+                let isPause = false;
+                let segmentDuration = 0;
+
+                if (phonemeKey === '_PAUSE_') {
+                    // Handle inserted punctuation pauses
+                    segmentDuration = pauseMs / 1000;
+                    isPause = true;
+                    phonemesUsed.push('_PAUSE_');
+                }
+                else if (isGibberish) {
+                    // 1. Animalese style: Map the phoneme key to a sound from the pool
+                    const charCode = phonemeKey.charCodeAt(0);
+                    const soundIndex = charCode % availablePhonemeKeys.length;
+                    buffer = state.audioBuffers[availablePhonemeKeys[soundIndex]];
+
+                    // 2. Apply random pitch variation (Animalese effect)
+                    const randomVariation = (Math.random() * pitchRange * 2) - pitchRange;
+                    pitch += randomVariation;
+                    pitch = Math.max(0.1, pitch); 
+                    phonemesUsed.push(phonemeKey + ' (Gibberish)');
+                } else {
+                    // Normal Concatenation (Phoneme-to-Phoneme mapping)
+                    buffer = state.audioBuffers[phonemeKey];
+                    pitch = basePitch;
+                    phonemesUsed.push(phonemeKey);
+                }
+
+                if (isPause) {
+                    buffersToPlay.push(null); // Null buffer for silence
+                    pitchesToApply.push(1.0);
+                    durations.push(segmentDuration);
+                }
+                else if (buffer) {
+                    segmentDuration = buffer.duration / pitch;
+                    
+                    buffersToPlay.push(buffer);
+                    pitchesToApply.push(pitch);
+                    durations.push(segmentDuration);
+                } else {
+                    // Fallback for missing phoneme (not a pause)
+                    console.warn(`Sound for phoneme '${phonemeKey}' is missing. Using fallback '${state.defaultPhoneme}'.`);
+                    const fallbackBuffer = state.audioBuffers[state.defaultPhoneme];
+                    if (fallbackBuffer) {
+                         segmentDuration = fallbackBuffer.duration / pitch;
+                         buffersToPlay.push(fallbackBuffer);
+                         pitchesToApply.push(pitch);
+                         durations.push(segmentDuration);
+                         phonemesUsed[phonemesUsed.length - 1] += ' (Fallback)';
+                    }
+                }
+            }
+            
+            // Recalculate total duration based on start times (simpler for download)
+            let currentTime = 0;
+            let finalEndTime = 0;
+
+            buffersToPlay.forEach((buffer, index) => {
+                const segmentDuration = durations[index];
+                
+                finalEndTime = currentTime + segmentDuration;
+
+                if (index < buffersToPlay.length - 1) {
+                    // Calculate next start time: Current segment duration + Delay - Crossfade overlap
+                    let nextStartTime = currentTime + segmentDuration + delaySeconds - crossfadeSeconds;
+                    
+                    // Ensure currentTime does not go backward and always progresses by at least a fraction of the shortest segment
+                    nextStartTime = Math.max(currentTime + (segmentDuration * 0.2), nextStartTime); 
+                    
+                    currentTime = nextStartTime;
+                }
+            });
+
+            totalDuration = finalEndTime;
+
+            return { buffersToPlay, pitchesToApply, durations, totalDuration, phonemesUsed };
+        }
+
+        /**
+         * Plays the generated audio sequence immediately.
+         */
+        function playSynthesizedSpeech(isGibberish) {
+            const { buffersToPlay, pitchesToApply, durations, error, phonemesUsed } = generateAudioSequence(isGibberish);
+            
+            if (error) {
+                showMessage(error, true);
+                return;
+            }
+
+            if (buffersToPlay.length === 0) {
+                showMessage("No playable sounds found in the input sentence.", true);
+                return;
+            }
+            
+            if (!state.audioContext) {
+                state.audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            }
+
+            if (state.audioContext.state === 'suspended') {
+                state.audioContext.resume();
+            }
+
+            let currentTime = state.audioContext.currentTime;
+            
+            const delayMs = parseInt(document.getElementById('delay-slider').value, 10);
+            const crossfadeMs = parseInt(document.getElementById('crossfade-slider').value, 10); 
+            const attackMs = parseInt(document.getElementById('attack-slider').value, 10); // NEW
+            const releaseMs = parseInt(document.getElementById('release-slider').value, 10); // NEW
+            
+            const delaySeconds = delayMs / 1000;
+            const crossfadeSeconds = crossfadeMs / 1000; 
+            const attackSeconds = attackMs / 1000; // NEW
+            const releaseSeconds = releaseMs / 1000; // NEW
+
+
+            buffersToPlay.forEach((buffer, index) => {
+                const pitch = pitchesToApply[index] || 1.0;
+                const segmentDuration = durations[index];
+
+                if (!buffer) {
+                    // This is a PAUSE segment, just advance time
+                    currentTime += segmentDuration;
+                    return;
+                }
+                
+                // 1. Create source
+                const source = state.audioContext.createBufferSource();
+                source.buffer = buffer;
+                
+                // 2. Apply Gain (for ADSR envelope)
+                const gainNode = state.audioContext.createGain();
+                source.connect(gainNode);
+                gainNode.connect(state.audioContext.destination);
+
+                // 3. Pitch and Start
+                source.playbackRate.value = pitch;
+                source.start(currentTime, 0, buffer.duration); 
+                
+                // 4. Implement Volume Envelope (Attack and Release)
+                
+                // Start with volume at 0
+                gainNode.gain.setValueAtTime(0, currentTime); 
+                
+                // Attack (Fade In): Ramp to 1.0 over attackSeconds
+                const attackEndTime = currentTime + attackSeconds;
+                gainNode.gain.linearRampToValueAtTime(1.0, attackEndTime); 
+
+                // Release (Fade Out): Ramp to 0.0 over releaseSeconds before the segment effectively ends
+                const segmentPlayDuration = segmentDuration;
+                const releaseStartTime = currentTime + segmentPlayDuration - releaseSeconds;
+
+                if (releaseStartTime > attackEndTime) {
+                    // Ensure the volume holds at 1.0 after attack and before release
+                    gainNode.gain.setValueAtTime(1.0, releaseStartTime);
+                    // Ramp down to 0.0 at the actual end time of the sound
+                    gainNode.gain.linearRampToValueAtTime(0, currentTime + segmentPlayDuration);
+                } else if (attackEndTime < currentTime + segmentPlayDuration) {
+                    // If the segment is too short for full attack/sustain/release, just ramp back down from attack end
+                    gainNode.gain.linearRampToValueAtTime(0, currentTime + segmentPlayDuration);
+                } else {
+                    // Extremely short segment: just ramp to end immediately
+                    gainNode.gain.linearRampToValueAtTime(0, currentTime + 0.01);
+                }
+
+
+                // 5. Calculate start time for the next sound
+                let nextStartTime = currentTime + segmentDuration + delaySeconds - crossfadeSeconds;
+                
+                // Ensure currentTime does not go backward and always progresses
+                nextStartTime = Math.max(currentTime + (segmentDuration * 0.2), nextStartTime); 
+                
+                currentTime = nextStartTime;
+            });
+            
+            showMessage(`Playing ${isGibberish ? 'Gibberish' : 'Normal'} speech using phonemes: [${phonemesUsed.join(', ')}]`);
+        }
+        
+        /**
+         * Renders the audio sequence into a single AudioBuffer for download.
+         */
+        async function downloadSynthesizedSpeech(isGibberish) {
+            if (state.isProcessing) {
+                showMessage("Please wait, an operation is currently in progress.", true);
+                return;
+            }
+            state.isProcessing = true;
+            showMessage("Generating audio file for download...", false);
+
+            const { buffersToPlay, pitchesToApply, durations, totalDuration, error, phonemesUsed } = generateAudioSequence(isGibberish);
+            
+            if (error) {
+                showMessage(error, true);
+                state.isProcessing = false;
+                return;
+            }
+
+            if (buffersToPlay.length === 0) {
+                showMessage("No playable sounds found to download.", true);
+                state.isProcessing = false;
+                return;
+            }
+
+            try {
+                if (!state.audioContext) {
+                    state.audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                }
+
+                const sampleRate = state.audioContext.sampleRate;
+                const numberOfChannels = 1; // Assuming mono output for simplicity
+                const frameCount = Math.ceil(totalDuration * sampleRate);
+
+                // Create an empty AudioBuffer for the final combined track
+                const outputBuffer = state.audioContext.createBuffer(numberOfChannels, frameCount, sampleRate);
+                const outputData = outputBuffer.getChannelData(0);
+                
+                let currentFrame = 0;
+                
+                // Get Control Values
+                const delayMs = parseInt(document.getElementById('delay-slider').value, 10);
+                const crossfadeMs = parseInt(document.getElementById('crossfade-slider').value, 10); 
+                const attackMs = parseInt(document.getElementById('attack-slider').value, 10); 
+                const releaseMs = parseInt(document.getElementById('release-slider').value, 10); 
+
+                const delaySeconds = delayMs / 1000;
+                const crossfadeSeconds = crossfadeMs / 1000; 
+                const attackSeconds = attackMs / 1000;
+                const releaseSeconds = releaseMs / 1000;
+
+                const crossfadeFrames = Math.ceil(crossfadeSeconds * sampleRate);
+
+
+                for (let i = 0; i < buffersToPlay.length; i++) {
+                    const buffer = buffersToPlay[i];
+                    const pitch = pitchesToApply[i];
+                    const segmentDuration = durations[i];
+                    
+                    const segmentPlayDuration = buffer ? buffer.duration / pitch : segmentDuration;
+                    
+                    if (!buffer) {
+                        // This is a PAUSE segment, just advance the frame counter by the pause length
+                        currentFrame += Math.ceil(segmentDuration * sampleRate);
+                        continue;
+                    }
+
+                    // 1. Apply pitch shift by resampling (simple stretch/compress)
+                    const inputData = buffer.getChannelData(0);
+                    const pitchedLength = Math.floor(inputData.length / pitch);
+                    
+                    // --- Calculate Envelope and Mix ---
+                    
+                    // Create a function to get the envelope gain at a specific time (relative to segment start)
+                    const getEnvelopeGain = (time) => {
+                        const attackEndTime = attackSeconds;
+                        const releaseStartTime = segmentPlayDuration - releaseSeconds;
+
+                        if (time < 0 || time > segmentPlayDuration) return 0;
+
+                        if (time < attackEndTime) {
+                            // Attack phase (0 to 1)
+                            return time / attackSeconds;
+                        } else if (time >= releaseStartTime) {
+                            // Release phase (1 to 0)
+                            const releaseTime = time - releaseStartTime;
+                            return 1.0 - (releaseTime / releaseSeconds);
+                        } else {
+                            // Sustain phase (1)
+                            return 1.0;
+                        }
+                    };
+
+
+                    // 2. Determine the insertion point and overlap frames.
+                    
+                    let startIndex = currentFrame;
+
+                    if (i > 0) {
+                        // The next sound should start at: previous segment end + delay - crossfade
+                        // We use the same time progression logic as in playSynthesizedSpeech
+                        let prevCurrentTime = 0;
+
+                        for (let k = 0; k < i; k++) {
+                            const prevSegmentDuration = durations[k];
+                            
+                            if (buffersToPlay[k]) {
+                                // If previous was sound, factor in pitch/delay/crossfade
+                                let prevPitch = pitchesToApply[k] || 1.0;
+                                let prevPlayDuration = buffersToPlay[k].duration / prevPitch;
+                                
+                                let nextStartTime = prevCurrentTime + prevPlayDuration + delaySeconds - crossfadeSeconds;
+                                nextStartTime = Math.max(prevCurrentTime + (prevPlayDuration * 0.2), nextStartTime);
+                                prevCurrentTime = nextStartTime;
+                            } else {
+                                // If previous was a PAUSE, just add its duration
+                                prevCurrentTime += prevSegmentDuration;
+                            }
+                        }
+                        
+                        // prevCurrentTime is the start time (in seconds) of the current segment (i)
+                        startIndex = Math.round(prevCurrentTime * sampleRate);
+                    }
+
+
+                    const tempBuffer = new Float32Array(pitchedLength);
+                    
+                    // 3. Apply envelope and copy/mix the current segment's data
+                    for (let j = 0; j < pitchedLength; j++) {
+                        const currentWriteIndex = startIndex + j;
+                        const timeInSegment = j / sampleRate;
+                        
+                        // 3a. Pitch Shift Index
+                        const inputIndex = Math.floor(j * pitch);
+
+                        if (inputIndex < inputData.length) {
+                             // 3b. Apply Envelope Gain
+                            const gain = getEnvelopeGain(timeInSegment);
+                            const segmentValue = inputData[inputIndex] * gain;
+                            
+                            if (currentWriteIndex < frameCount) {
+                                
+                                // 3c. Crossfade Mixing (if overlapping)
+                                if (i > 0 && currentWriteIndex < currentFrame && crossfadeFrames > 0) {
+                                    // This is the overlap region. currentFrame is the end of the previous segment.
+                                    const overlapProgress = (currentWriteIndex - (currentFrame - crossfadeFrames)) / crossfadeFrames;
+                                    
+                                    // Mix the new segment (fades in) with the old segment (already in outputData, fades out)
+                                    // OutputData already contains the fading out previous segment
+                                    const fadeOutFactor = 1 - overlapProgress; // Prev sound fades out
+                                    const fadeInFactor = overlapProgress;       // Current sound fades in
+
+                                    outputData[currentWriteIndex] = 
+                                        (outputData[currentWriteIndex] * fadeOutFactor) + 
+                                        (segmentValue * fadeInFactor);
+                                } else {
+                                    // Standard copy region (non-overlapping)
+                                    outputData[currentWriteIndex] = segmentValue;
+                                }
+                            }
+                        }
+                    }
+
+                    // 4. Update currentFrame to the start of the next potential segment.
+                    // Recalculate using the playing time logic for consistency
+                    let nextStartTime = startIndex / sampleRate; // Start time of this segment in seconds
+                    
+                    if (i < buffersToPlay.length - 1) {
+                         nextStartTime += segmentPlayDuration + delaySeconds - crossfadeSeconds;
+                    }
+                    nextStartTime = Math.max((startIndex / sampleRate) + (segmentPlayDuration * 0.2), nextStartTime); 
+
+                    currentFrame = Math.round(nextStartTime * sampleRate);
+                }
+                
+                // Final calculation of the frame count to handle the last segment's true end
+                const finalFrameCount = Math.ceil(totalDuration * sampleRate);
+                
+                // Re-create the AudioBuffer and copy only the utilized portion
+                const finalOutputBuffer = state.audioContext.createBuffer(numberOfChannels, finalFrameCount, sampleRate);
+                finalOutputBuffer.getChannelData(0).set(outputData.slice(0, finalFrameCount));
+                
+                // Convert the AudioBuffer to a WAV blob
+                const wavBlob = bufferToWav(finalOutputBuffer);
+
+                // Create a download link
+                const url = URL.createObjectURL(wavBlob);
+                const a = document.createElement('a');
+                a.style.display = 'none';
+                a.href = url;
+                const synthType = isGibberish ? 'gibberish' : 'normal';
+                a.download = `synthesized_${synthType}_${Date.now()}.wav`;
+                document.body.appendChild(a);
+                a.click();
+                window.URL.revokeObjectURL(url);
+                document.body.removeChild(a);
+
+                showMessage(`Download successful! Phonemes used: [${phonemesUsed.join(', ')}]`);
+
+            } catch (error) {
+                showMessage(`Download Error: ${error.message}`, true);
+                console.error("Download Error:", error);
+            } finally {
+                state.isProcessing = false;
+            }
+        }
+
+        // --- UI Rendering Function ---
+
+        function renderPhonemeUploadList() {
+            const container = document.getElementById('phoneme-upload-list');
+            container.innerHTML = ''; // Clear existing content
+
+            PHONEME_GROUPS.forEach(group => {
+                const groupDiv = document.createElement('div');
+                groupDiv.className = 'mb-6';
+                groupDiv.innerHTML = `<h3 class="text-lg font-semibold text-gray-800 mb-2 mt-4 border-b pb-1">${group.title}</h3>`;
+                
+                group.keys.forEach(item => {
+                    // Skip rendering for the generated _PAUSE_ key
+                    if (item.key === '_PAUSE_') return;
+
+                    const row = document.createElement('div');
+                    row.className = 'phoneme-row';
+                    
+                    row.innerHTML = `
+                        <!-- Phoneme Key & Status -->
+                        <div class="flex items-center space-x-2">
+                            <span class="font-mono font-extrabold text-lg text-indigo-600">${item.key}</span>
+                            <span id="status-${item.key}" class="status-chip bg-red-100 text-red-700">MISSING</span>
+                        </div>
+
+                        <!-- File Input -->
+                        <div class="flex flex-col text-xs">
+                             <input type="file" id="file-${item.key}" accept="audio/*" class="w-full text-xs text-gray-500 file:mr-2 file:py-1 file:px-2 file:rounded-full file:border-0 file:text-xs file:font-semibold file:bg-violet-50 file:text-indigo-700 hover:file:bg-violet-100" />
+                             <p class="text-gray-400 mt-1">Ex: ${item.example} (${item.description})</p>
+                        </div>
+                        
+                        <!-- Upload Button -->
+                        <button id="upload-${item.key}" class="btn btn-primary text-sm" data-key="${item.key}">Upload</button>
+                    `;
+                    container.appendChild(row);
+
+                    // Attach listener to the upload button
+                    row.querySelector(`#upload-${item.key}`).addEventListener('click', (e) => {
+                        handleUpload(item.key);
+                    });
+                });
+                container.appendChild(groupDiv);
+            });
+        }
+
+
+        // --- Event Listeners and Initial Load ---
+        window.onload = () => {
+            renderPhonemeUploadList();
+            initializePhonemes();
+
+            document.getElementById('synth-button').addEventListener('click', () => playSynthesizedSpeech(false));
+            document.getElementById('gibberish-play-button').addEventListener('click', () => playSynthesizedSpeech(true));
+            document.getElementById('synth-download-button').addEventListener('click', () => downloadSynthesizedSpeech(false));
+            document.getElementById('gibberish-download-button').addEventListener('click', () => downloadSynthesizedSpeech(true));
+            
+            // Workflow Buttons
+            document.getElementById('clear-phonemes-button').addEventListener('click', () => {
+                const isConfirmed = confirm('Are you sure you want to clear all uploaded sounds? This cannot be undone.');
+                if (isConfirmed) {
+                    localStorage.removeItem(PHONEME_STORAGE_KEY);
+                    state.phonemeMap = {};
+                    state.audioBuffers = {};
+                    renderPhonemeUploadList(); 
+                    processPhonemeMap(state.phonemeMap); 
+                    showMessage("All phonemes cleared from local storage.");
+                }
+            });
+
+            document.getElementById('export-phonemes-button').addEventListener('click', exportPhonemeMap);
+            document.getElementById('import-phonemes-file').addEventListener('change', importPhonemeMap);
+
+            
+            // Update slider displays on movement
+            document.getElementById('pitch-slider').addEventListener('input', (e) => {
+                document.getElementById('pitch-value').textContent = e.target.value;
+            });
+            document.getElementById('pitch-variation').addEventListener('input', (e) => {
+                document.getElementById('variation-value').textContent = e.target.value;
+            });
+            document.getElementById('delay-slider').addEventListener('input', (e) => {
+                document.getElementById('delay-value').textContent = e.target.value;
+            });
+            document.getElementById('crossfade-slider').addEventListener('input', (e) => {
+                document.getElementById('crossfade-value').textContent = e.target.value;
+            });
+            document.getElementById('pause-slider').addEventListener('input', (e) => {
+                document.getElementById('pause-value').textContent = e.target.value;
+            });
+             document.getElementById('attack-slider').addEventListener('input', (e) => {
+                document.getElementById('attack-value').textContent = e.target.value;
+            });
+            document.getElementById('release-slider').addEventListener('input', (e) => {
+                document.getElementById('release-value').textContent = e.target.value;
+            });
+        };
+    </script>
+</head>
+<body class="p-8 min-h-screen flex items-start justify-center">
+
+    <div class="container space-y-8">
+        <header class="text-center mb-10">
+            <h1 class="text-4xl font-extrabold text-gray-800">Custom Choppy Voice Synthesizer</h1>
+            <p class="text-gray-500 mt-2">Upload your sound segments to create unique, game-style dialogue.</p>
+        </header>
+
+        <div id="status-area" class="text-center mb-6">
+            <p id="status-message" class="text-gray-500 italic">Initializing...</p>
+        </div>
+        
+        <!-- Upload Section -->
+        <div class="synth-card">
+            <h2 class="text-2xl font-bold mb-4 text-indigo-700">1. Create Your Voice Library</h2>
+            
+            <!-- Instructions Guide -->
+            <div class="guide-box">
+                <h4 class="font-bold text-indigo-700 mb-2">How to Record Your Phoneme Sounds:</h4>
+                <ul class="text-gray-700 text-sm space-y-1">
+                    <li>**Duration:** Each clip should be **very short (0.1 to 0.5 seconds)**.</li>
+                    <li>**Clarity:** Record the sound in isolation (e.g., just the 'kuh' sound, not the word 'kit').</li>
+                    <li>**Format:** Use a common format like WAV or MP3.</li>
+                    <li>**Tip:** Use the **Attack** and **Release** controls below to smooth out abrupt starts and stops.</li>
+                </ul>
+            </div>
+
+            <!-- Dynamic Phoneme List Container -->
+            <div id="phoneme-upload-list" class="space-y-2">
+                <!-- List will be populated by JavaScript -->
+            </div>
+            
+            <div class="mt-6 text-sm text-gray-600 border-t pt-4">
+                <p class="font-semibold" id="available-phonemes">Loading phoneme status...</p>
+                <p class="text-xs mt-2 text-red-500">
+                    If the system needs a MISSING phoneme, it will fall back to the sound uploaded for the **A** key.
+                </p>
+            </div>
+            
+            <!-- Export/Import & Clear Buttons -->
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
+                <button id="export-phonemes-button" class="btn btn-secondary text-indigo-600 border border-indigo-300">
+                    Export Voice (.json)
+                </button>
+                <div class="flex items-center space-x-2">
+                    <label for="import-phonemes-file" class="btn btn-secondary text-indigo-600 border border-indigo-300 cursor-pointer w-full text-center">
+                        Import Voice (.json)
+                    </label>
+                    <input type="file" id="import-phonemes-file" accept="application/json" class="hidden" />
+                </div>
+            </div>
+            <button id="clear-phonemes-button" class="mt-4 btn btn-secondary w-full text-red-600 border border-red-300">Clear All Uploaded Sounds (Local Storage)</button>
+
+        </div>
+
+        <!-- Synthesis Section -->
+        <div class="synth-card">
+            <h2 class="text-2xl font-bold mb-4 text-indigo-700">2. Synthesize Speech</h2>
+            <textarea id="input-sentence" rows="3" placeholder="Type the sentence you want to synthesize here (e.g., 'Hello, world?')." class="mb-4"></textarea>
+            
+            <!-- Controls Grid -->
+            <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
+                <!-- Base Pitch -->
+                <div>
+                    <label for="pitch-slider" class="block text-sm font-medium text-gray-700 mb-1">
+                        Base Pitch Multiplier: (<span id="pitch-value">1.0</span>x)
+                    </label>
+                    <input type="range" id="pitch-slider" min="0.5" max="2.0" step="0.1" value="1.0" class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer range-lg" />
+                </div>
+                <!-- Inter-Sound Delay -->
+                <div>
+                    <label for="delay-slider" class="block text-sm font-medium text-gray-700 mb-1">
+                        Inter-Sound Delay: (<span id="delay-value">50</span>ms)
+                    </label>
+                    <input type="range" id="delay-slider" min="0" max="200" step="10" value="50" class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer range-lg" />
+                </div>
+                <!-- Crossfade Duration -->
+                <div>
+                    <label for="crossfade-slider" class="block text-sm font-medium text-gray-700 mb-1">
+                        Crossfade Overlap: (<span id="crossfade-value">0</span>ms)
+                    </label>
+                    <input type="range" id="crossfade-slider" min="0" max="100" step="10" value="0" class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer range-lg" />
+                </div>
+                 <!-- Punctuation Pause -->
+                <div>
+                    <label for="pause-slider" class="block text-sm font-medium text-gray-700 mb-1">
+                        Punctuation Pause: (<span id="pause-value">300</span>ms)
+                    </label>
+                    <input type="range" id="pause-slider" min="100" max="1000" step="50" value="300" class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer range-lg" />
+                </div>
+            </div>
+
+            <!-- Envelope Controls Grid -->
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6 pt-4 border-t">
+                 <!-- Attack Duration -->
+                <div>
+                    <label for="attack-slider" class="block text-sm font-medium text-gray-700 mb-1">
+                        Attack (Fade In): (<span id="attack-value">10</span>ms)
+                    </label>
+                    <input type="range" id="attack-slider" min="0" max="100" step="5" value="10" class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer range-lg" />
+                </div>
+                <!-- Release Duration -->
+                <div>
+                    <label for="release-slider" class="block text-sm font-medium text-gray-700 mb-1">
+                        Release (Fade Out): (<span id="release-value">10</span>ms)
+                    </label>
+                    <input type="range" id="release-slider" min="0" max="100" step="5" value="10" class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer range-lg" />
+                </div>
+                <!-- Gibberish Variation -->
+                <div>
+                    <label for="pitch-variation" class="block text-sm font-medium text-gray-700 mb-1">
+                        Gibberish Pitch Variation (+/-): (<span id="variation-value">0.3</span>x)
+                    </label>
+                    <input type="range" id="pitch-variation" min="0.0" max="1.0" step="0.05" value="0.3" class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer range-lg" />
+                </div>
+            </div>
+
+
+            <!-- Play Buttons -->
+            <div class="grid grid-cols-2 gap-4">
+                <button id="synth-button" class="btn btn-primary">
+                    ▶️ Play Normal (Smoother)
+                </button>
+                <button id="gibberish-play-button" class="btn btn-secondary">
+                    🗣️ Play Gibberish (Animalese Style)
+                </button>
+            </div>
+
+            <!-- Download Buttons -->
+            <div class="mt-4 grid grid-cols-2 gap-4">
+                 <button id="synth-download-button" class="btn btn-primary bg-green-500 hover:bg-green-600">
+                    ⬇️ Download Normal WAV
+                </button>
+                <button id="gibberish-download-button" class="btn btn-secondary bg-yellow-500 hover:bg-yellow-600 text-white">
+                    ⬇️ Download Gibberish WAV
+                </button>
+            </div>
+        </div>
+        
+        <footer class="text-center text-sm text-gray-400 mt-8">
+            <p>Data stored locally in your browser's Local Storage.</p>
+        </footer>
+    </div>
+</body>
+</html>
