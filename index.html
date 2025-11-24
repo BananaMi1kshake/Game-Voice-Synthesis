@@ -43,14 +43,14 @@
         .btn-secondary:hover {
             background-color: #e5e7eb;
         }
-        input[type="text"], input[type="number"], textarea {
+        input[type="text"], input[type="number"], textarea, select {
             border: 1px solid #d1d5db;
             border-radius: 8px;
             padding: 10px;
             width: 100%;
             transition: border-color 0.2s;
         }
-        input:focus, textarea:focus {
+        input:focus, textarea:focus, select:focus {
             border-color: #4f46e5;
             outline: none;
         }
@@ -168,6 +168,16 @@
                 ]
             }
         ];
+        
+        // --- PRESETS DEFINITIONS ---
+        const PRESETS = {
+            'default': { pitch: 1.0, delay: 50, crossfade: 0, pause: 300, attack: 10, release: 10, variation: 0.3, lpf: 20000, chorus: 0.0, reverb: 0.0 },
+            'robot': { pitch: 0.8, delay: 80, crossfade: 0, pause: 400, attack: 5, release: 5, variation: 0.0, lpf: 15000, chorus: 0.5, reverb: 0.0 },
+            'child': { pitch: 1.4, delay: 20, crossfade: 10, pause: 200, attack: 15, release: 5, variation: 0.4, lpf: 20000, chorus: 0.0, reverb: 0.0 },
+            'monster': { pitch: 0.6, delay: 100, crossfade: 20, pause: 500, attack: 50, release: 50, variation: 0.1, lpf: 5000, chorus: 0.0, reverb: 0.5 },
+            'radio': { pitch: 1.0, delay: 30, crossfade: 10, pause: 300, attack: 5, release: 5, variation: 0.1, lpf: 3000, chorus: 0.0, reverb: 0.0 },
+        };
+
 
         // --- Utility Functions ---
 
@@ -449,9 +459,6 @@
 
         /**
          * Simple rule-based Grapheme-to-Phoneme approximation for choppy TTS.
-         * Inserts _PAUSE_ for punctuation.
-         * @param {string} text - The input text (e.g., "CATS.").
-         * @returns {string[]} An array of phoneme keys (e.g., ["K", "A", "T", "S", "_PAUSE_"]).
          */
         function simpleG2P(text) {
             const result = [];
@@ -538,8 +545,39 @@
         }
 
         /**
+         * Calculates the start time of the next audio segment, compensating for pitch change.
+         * This maintains the intended rhythmic slot regardless of audio stretching/compression.
+         */
+        function calculateNextStartTime(currentTime, index, buffers, pitches, nominalDurations, durations, delaySeconds, crossfadeSeconds) {
+            const segmentDuration = durations[index]; // Actual play time (D_play)
+            const nominalDuration = nominalDurations[index] || 0; // Original duration (D_orig)
+            
+            if (buffers[index] === null) {
+                // Pause segment: just advance by the pause duration
+                return currentTime + segmentDuration;
+            }
+            
+            // 1. Calculate the intended rhythmic slot (based on D_orig)
+            // This is the time interval we want the segment to occupy.
+            let rhythmSlot = nominalDuration + delaySeconds - crossfadeSeconds;
+
+            // 2. The time advance must be the larger of the actual playing time (D_play) 
+            // or the intended rhythmic slot.
+            // This prevents the sound from being cut off if P is low (D_play > rhythmSlot)
+            // AND maintains the fast rhythm if P is high (D_play < rhythmSlot).
+            let timeAdvance = Math.max(segmentDuration, rhythmSlot); 
+            
+            // 3. Prevent rhythm collapse if crossfade/delay settings are extreme relative to D_orig
+            const MIN_ADVANCE_FACTOR = 0.2; // Ensure at least 20% of nominal duration passes
+            timeAdvance = Math.max(nominalDuration * MIN_ADVANCE_FACTOR, timeAdvance);
+
+            return currentTime + timeAdvance;
+        }
+
+
+        /**
          * Core function to generate the sequence of buffers and pitches based on input.
-         * Returns { buffersToPlay, pitchesToApply, totalDuration, phonemesUsed }
+         * Returns { buffersToPlay, pitchesToApply, durations, nominalDurations, totalDuration, phonemesUsed }
          */
         function generateAudioSequence(isGibberish) {
             const sentence = document.getElementById('input-sentence').value.trim().toUpperCase();
@@ -551,35 +589,35 @@
             
             let buffersToPlay = [];
             let pitchesToApply = [];
-            let durations = [];
+            let durations = []; // Actual calculated play duration (D_play)
+            let nominalDurations = []; // Original buffer duration (D_orig)
             
             const basePitch = parseFloat(document.getElementById('pitch-slider').value);
             const pitchRange = parseFloat(document.getElementById('pitch-variation').value);
+            const pauseMs = parseInt(document.getElementById('pause-slider').value, 10);
             
+            // Timing controls needed for calculateNextStartTime
             const delayMs = parseInt(document.getElementById('delay-slider').value, 10);
-            const pauseMs = parseInt(document.getElementById('pause-slider').value, 10); // NEW
-            const crossfadeMs = parseInt(document.getElementById('crossfade-slider').value, 10);
-            
+            const crossfadeMs = parseInt(document.getElementById('crossfade-slider').value, 10); 
             const delaySeconds = delayMs / 1000;
             const crossfadeSeconds = crossfadeMs / 1000; 
 
             
-            let totalDuration = 0;
             let phonemesUsed = [];
 
             // A list of all available phoneme buffer keys
             const availablePhonemeKeys = Object.keys(state.audioBuffers);
             
             for (const phonemeKey of phonemes) {
-                let buffer;
+                let buffer = null;
                 let pitch = basePitch;
-                let isPause = false;
-                let segmentDuration = 0;
+                let nominalDuration = 0;
+                let segmentDuration = 0; // D_play
 
                 if (phonemeKey === '_PAUSE_') {
                     // Handle inserted punctuation pauses
                     segmentDuration = pauseMs / 1000;
-                    isPause = true;
+                    nominalDuration = segmentDuration; // Pause duration is its own nominal duration
                     phonemesUsed.push('_PAUSE_');
                 }
                 else if (isGibberish) {
@@ -600,61 +638,155 @@
                     phonemesUsed.push(phonemeKey);
                 }
 
-                if (isPause) {
-                    buffersToPlay.push(null); // Null buffer for silence
-                    pitchesToApply.push(1.0);
-                    durations.push(segmentDuration);
-                }
-                else if (buffer) {
-                    segmentDuration = buffer.duration / pitch;
-                    
-                    buffersToPlay.push(buffer);
-                    pitchesToApply.push(pitch);
-                    durations.push(segmentDuration);
-                } else {
-                    // Fallback for missing phoneme (not a pause)
+                if (buffer) {
+                    nominalDuration = buffer.duration;
+                    segmentDuration = nominalDuration / pitch;
+                } else if (phonemeKey !== '_PAUSE_') {
+                    // Fallback for missing non-pause phoneme
                     console.warn(`Sound for phoneme '${phonemeKey}' is missing. Using fallback '${state.defaultPhoneme}'.`);
                     const fallbackBuffer = state.audioBuffers[state.defaultPhoneme];
                     if (fallbackBuffer) {
-                         segmentDuration = fallbackBuffer.duration / pitch;
-                         buffersToPlay.push(fallbackBuffer);
-                         pitchesToApply.push(pitch);
-                         durations.push(segmentDuration);
+                         buffer = fallbackBuffer;
+                         nominalDuration = buffer.duration;
+                         segmentDuration = nominalDuration / pitch;
                          phonemesUsed[phonemesUsed.length - 1] += ' (Fallback)';
                     }
                 }
+                
+                buffersToPlay.push(buffer);
+                pitchesToApply.push(pitch);
+                durations.push(segmentDuration);
+                nominalDurations.push(nominalDuration);
             }
             
-            // Recalculate total duration based on start times (simpler for download)
+            // Calculate total duration using the rhythmic timing logic
             let currentTime = 0;
             let finalEndTime = 0;
 
-            buffersToPlay.forEach((buffer, index) => {
-                const segmentDuration = durations[index];
-                
-                finalEndTime = currentTime + segmentDuration;
+            for (let i = 0; i < buffersToPlay.length; i++) {
+                // If it's a sound, the end time is current time + its actual play duration
+                // If it's a pause, the end time is current time + its pause duration
+                finalEndTime = currentTime + durations[i];
 
-                if (index < buffersToPlay.length - 1) {
-                    // Calculate next start time: Current segment duration + Delay - Crossfade overlap
-                    let nextStartTime = currentTime + segmentDuration + delaySeconds - crossfadeSeconds;
-                    
-                    // Ensure currentTime does not go backward and always progresses by at least a fraction of the shortest segment
-                    nextStartTime = Math.max(currentTime + (segmentDuration * 0.2), nextStartTime); 
-                    
-                    currentTime = nextStartTime;
+                if (i < buffersToPlay.length - 1) {
+                    currentTime = calculateNextStartTime(currentTime, i, buffersToPlay, pitchesToApply, nominalDurations, durations, delaySeconds, crossfadeSeconds);
                 }
-            });
+            }
 
             totalDuration = finalEndTime;
 
-            return { buffersToPlay, pitchesToApply, durations, totalDuration, phonemesUsed };
+            return { buffersToPlay, pitchesToApply, durations, nominalDurations, totalDuration, phonemesUsed };
         }
+
+        /**
+         * Creates and configures the Web Audio API effect chain (LPF -> Chorus -> Reverb -> Destination).
+         * @param {AudioContext | OfflineAudioContext} context - The audio context to use.
+         * @param {AudioNode} sourceNode - The node where the audio enters the chain.
+         * @param {AudioNode} destinationNode - The final destination (Context destination or Recorder).
+         * @param {number} startTime - The time the source starts.
+         * @param {number} endTime - The time the source ends.
+         * @returns {AudioNode} The node where the audio exits the effects chain (before connecting to destination).
+         */
+        function applyEffectsChain(context, sourceNode, destinationNode, startTime, endTime) {
+            
+            // Get slider values
+            const lpfValue = parseFloat(document.getElementById('lpf-slider').value);
+            const chorusValue = parseFloat(document.getElementById('chorus-slider').value);
+            const reverbValue = parseFloat(document.getElementById('reverb-slider').value);
+            
+            let lastNode = sourceNode;
+
+            // --- 1. Low-Pass Filter (LPF) ---
+            if (lpfValue < 20000) {
+                const lpf = context.createBiquadFilter();
+                lpf.type = 'lowpass';
+                lpf.frequency.setValueAtTime(lpfValue, context.currentTime);
+                lastNode.connect(lpf);
+                lastNode = lpf;
+            }
+            
+            // --- 2. Chorus Effect (Simple delay modulation) ---
+            if (chorusValue > 0.0) {
+                const chorusDelay = context.createDelay(1.0);
+                chorusDelay.delayTime.setValueAtTime(0.02 * chorusValue, startTime); // Base delay: 20ms * depth
+                
+                // LFO (Low-Frequency Oscillator) for modulation
+                const lfo = context.createOscillator();
+                lfo.frequency.setValueAtTime(5, startTime); // 5 Hz modulation rate
+                
+                const gainNode = context.createGain();
+                gainNode.gain.setValueAtTime(0.005 * chorusValue, startTime); // Modulation depth
+                
+                lfo.connect(gainNode);
+                gainNode.connect(chorusDelay.delayTime);
+
+                // Mix the wet signal (delayed) with the dry signal (lastNode)
+                const merger = context.createChannelMerger(2);
+                
+                lastNode.connect(chorusDelay); // Dry signal to delay
+                lastNode.connect(merger, 0, 0); // Dry signal to merger (left)
+                lastNode.connect(merger, 0, 1); // Dry signal to merger (right)
+                
+                chorusDelay.connect(merger, 0, 0); // Wet signal to merger (left)
+                chorusDelay.connect(merger, 0, 1); // Wet signal to merger (right)
+
+                // Start LFO
+                lfo.start(startTime);
+                lfo.stop(endTime);
+
+                lastNode.connect(chorusDelay);
+                lastNode.connect(destinationNode); // Dry path
+                chorusDelay.connect(destinationNode); // Wet path
+
+                lastNode = destinationNode; // Note: This structure bypasses standard single-path chaining
+                return destinationNode;
+            }
+
+            // --- 3. Reverb/Delay Effect (Simple Delay) ---
+            if (reverbValue > 0.0) {
+                const delayNode = context.createDelay(1.0);
+                const feedbackGain = context.createGain();
+                const outputGain = context.createGain(); // Wet signal gain
+                const dryGain = context.createGain(); // Dry signal gain
+
+                const delayTime = 0.3 * reverbValue; // Max 300ms delay
+                const feedbackAmount = 0.5 * reverbValue; // Max 50% feedback
+                const wetMix = 0.5 * reverbValue; // Max 50% wet mix
+
+                delayNode.delayTime.setValueAtTime(delayTime, startTime);
+                feedbackGain.gain.setValueAtTime(feedbackAmount, startTime);
+                outputGain.gain.setValueAtTime(wetMix, startTime);
+                dryGain.gain.setValueAtTime(1.0, startTime);
+
+                // Delay signal path: lastNode -> delay -> feedback -> delay
+                lastNode.connect(delayNode);
+                delayNode.connect(feedbackGain);
+                feedbackGain.connect(delayNode); 
+
+                // Wet output: delay -> outputGain -> destination
+                delayNode.connect(outputGain);
+                outputGain.connect(destinationNode);
+
+                // Dry output: lastNode -> dryGain -> destination
+                lastNode.connect(dryGain);
+                dryGain.connect(destinationNode);
+                
+                lastNode = destinationNode; // Final output goes to destination
+                return destinationNode;
+            }
+
+
+            // If no complex effects (Chorus/Reverb) are used, connect the last node directly.
+            lastNode.connect(destinationNode);
+            return destinationNode;
+        }
+
 
         /**
          * Plays the generated audio sequence immediately.
          */
         function playSynthesizedSpeech(isGibberish) {
-            const { buffersToPlay, pitchesToApply, durations, error, phonemesUsed } = generateAudioSequence(isGibberish);
+            const { buffersToPlay, pitchesToApply, durations, nominalDurations, error, phonemesUsed } = generateAudioSequence(isGibberish);
             
             if (error) {
                 showMessage(error, true);
@@ -673,18 +805,19 @@
             if (state.audioContext.state === 'suspended') {
                 state.audioContext.resume();
             }
-
-            let currentTime = state.audioContext.currentTime;
+            
+            const context = state.audioContext;
+            let currentTime = context.currentTime;
             
             const delayMs = parseInt(document.getElementById('delay-slider').value, 10);
             const crossfadeMs = parseInt(document.getElementById('crossfade-slider').value, 10); 
-            const attackMs = parseInt(document.getElementById('attack-slider').value, 10); // NEW
-            const releaseMs = parseInt(document.getElementById('release-slider').value, 10); // NEW
+            const attackMs = parseInt(document.getElementById('attack-slider').value, 10); 
+            const releaseMs = parseInt(document.getElementById('release-slider').value, 10); 
             
             const delaySeconds = delayMs / 1000;
             const crossfadeSeconds = crossfadeMs / 1000; 
-            const attackSeconds = attackMs / 1000; // NEW
-            const releaseSeconds = releaseMs / 1000; // NEW
+            const attackSeconds = attackMs / 1000; 
+            const releaseSeconds = releaseMs / 1000; 
 
 
             buffersToPlay.forEach((buffer, index) => {
@@ -693,24 +826,30 @@
 
                 if (!buffer) {
                     // This is a PAUSE segment, just advance time
-                    currentTime += segmentDuration;
+                    if (index < buffersToPlay.length - 1) {
+                        currentTime = calculateNextStartTime(currentTime, index, buffersToPlay, pitchesToApply, nominalDurations, durations, delaySeconds, crossfadeSeconds);
+                    } else {
+                        currentTime += segmentDuration;
+                    }
                     return;
                 }
                 
                 // 1. Create source
-                const source = state.audioContext.createBufferSource();
+                const source = context.createBufferSource();
                 source.buffer = buffer;
                 
                 // 2. Apply Gain (for ADSR envelope)
-                const gainNode = state.audioContext.createGain();
+                const gainNode = context.createGain();
                 source.connect(gainNode);
-                gainNode.connect(state.audioContext.destination);
+                
+                // 3. Connect to the Effects Chain
+                applyEffectsChain(context, gainNode, context.destination, currentTime, currentTime + segmentDuration);
 
-                // 3. Pitch and Start
+                // 4. Pitch and Start
                 source.playbackRate.value = pitch;
                 source.start(currentTime, 0, buffer.duration); 
                 
-                // 4. Implement Volume Envelope (Attack and Release)
+                // 5. Implement Volume Envelope (Attack and Release)
                 
                 // Start with volume at 0
                 gainNode.gain.setValueAtTime(0, currentTime); 
@@ -737,20 +876,17 @@
                 }
 
 
-                // 5. Calculate start time for the next sound
-                let nextStartTime = currentTime + segmentDuration + delaySeconds - crossfadeSeconds;
-                
-                // Ensure currentTime does not go backward and always progresses
-                nextStartTime = Math.max(currentTime + (segmentDuration * 0.2), nextStartTime); 
-                
-                currentTime = nextStartTime;
+                // 6. Calculate start time for the next sound (if not the last)
+                if (index < buffersToPlay.length - 1) {
+                    currentTime = calculateNextStartTime(currentTime, index, buffersToPlay, pitchesToApply, nominalDurations, durations, delaySeconds, crossfadeSeconds);
+                }
             });
             
             showMessage(`Playing ${isGibberish ? 'Gibberish' : 'Normal'} speech using phonemes: [${phonemesUsed.join(', ')}]`);
         }
         
         /**
-         * Renders the audio sequence into a single AudioBuffer for download.
+         * Renders the audio sequence into a single AudioBuffer for download using OfflineAudioContext.
          */
         async function downloadSynthesizedSpeech(isGibberish) {
             if (state.isProcessing) {
@@ -758,9 +894,9 @@
                 return;
             }
             state.isProcessing = true;
-            showMessage("Generating audio file for download...", false);
+            showMessage("Rendering audio file with effects (this may take a few seconds)...", false);
 
-            const { buffersToPlay, pitchesToApply, durations, totalDuration, error, phonemesUsed } = generateAudioSequence(isGibberish);
+            const { buffersToPlay, pitchesToApply, durations, nominalDurations, totalDuration, error, phonemesUsed } = generateAudioSequence(isGibberish);
             
             if (error) {
                 showMessage(error, true);
@@ -778,16 +914,13 @@
                 if (!state.audioContext) {
                     state.audioContext = new (window.AudioContext || window.webkitAudioContext)();
                 }
-
                 const sampleRate = state.audioContext.sampleRate;
-                const numberOfChannels = 1; // Assuming mono output for simplicity
-                const frameCount = Math.ceil(totalDuration * sampleRate);
+                const numberOfChannels = 1;
 
-                // Create an empty AudioBuffer for the final combined track
-                const outputBuffer = state.audioContext.createBuffer(numberOfChannels, frameCount, sampleRate);
-                const outputData = outputBuffer.getChannelData(0);
-                
-                let currentFrame = 0;
+                // Use OfflineAudioContext for deterministic rendering with effects
+                const offlineContext = new OfflineAudioContext(numberOfChannels, Math.ceil(totalDuration * sampleRate), sampleRate);
+
+                let currentTime = 0;
                 
                 // Get Control Values
                 const delayMs = parseInt(document.getElementById('delay-slider').value, 10);
@@ -799,140 +932,77 @@
                 const crossfadeSeconds = crossfadeMs / 1000; 
                 const attackSeconds = attackMs / 1000;
                 const releaseSeconds = releaseMs / 1000;
+                
+                buffersToPlay.forEach((buffer, index) => {
+                    const pitch = pitchesToApply[index] || 1.0;
+                    const segmentDuration = durations[index];
 
-                const crossfadeFrames = Math.ceil(crossfadeSeconds * sampleRate);
-
-
-                for (let i = 0; i < buffersToPlay.length; i++) {
-                    const buffer = buffersToPlay[i];
-                    const pitch = pitchesToApply[i];
-                    const segmentDuration = durations[i];
-                    
-                    const segmentPlayDuration = buffer ? buffer.duration / pitch : segmentDuration;
-                    
                     if (!buffer) {
-                        // This is a PAUSE segment, just advance the frame counter by the pause length
-                        currentFrame += Math.ceil(segmentDuration * sampleRate);
-                        continue;
-                    }
-
-                    // 1. Apply pitch shift by resampling (simple stretch/compress)
-                    const inputData = buffer.getChannelData(0);
-                    const pitchedLength = Math.floor(inputData.length / pitch);
-                    
-                    // --- Calculate Envelope and Mix ---
-                    
-                    // Create a function to get the envelope gain at a specific time (relative to segment start)
-                    const getEnvelopeGain = (time) => {
-                        const attackEndTime = attackSeconds;
-                        const releaseStartTime = segmentPlayDuration - releaseSeconds;
-
-                        if (time < 0 || time > segmentPlayDuration) return 0;
-
-                        if (time < attackEndTime) {
-                            // Attack phase (0 to 1)
-                            return time / attackSeconds;
-                        } else if (time >= releaseStartTime) {
-                            // Release phase (1 to 0)
-                            const releaseTime = time - releaseStartTime;
-                            return 1.0 - (releaseTime / releaseSeconds);
+                        // This is a PAUSE segment, just advance time
+                        if (index < buffersToPlay.length - 1) {
+                            currentTime = calculateNextStartTime(currentTime, index, buffersToPlay, pitchesToApply, nominalDurations, durations, delaySeconds, crossfadeSeconds);
                         } else {
-                            // Sustain phase (1)
-                            return 1.0;
+                            currentTime += segmentDuration;
                         }
-                    };
-
-
-                    // 2. Determine the insertion point and overlap frames.
-                    
-                    let startIndex = currentFrame;
-
-                    if (i > 0) {
-                        // The next sound should start at: previous segment end + delay - crossfade
-                        // We use the same time progression logic as in playSynthesizedSpeech
-                        let prevCurrentTime = 0;
-
-                        for (let k = 0; k < i; k++) {
-                            const prevSegmentDuration = durations[k];
-                            
-                            if (buffersToPlay[k]) {
-                                // If previous was sound, factor in pitch/delay/crossfade
-                                let prevPitch = pitchesToApply[k] || 1.0;
-                                let prevPlayDuration = buffersToPlay[k].duration / prevPitch;
-                                
-                                let nextStartTime = prevCurrentTime + prevPlayDuration + delaySeconds - crossfadeSeconds;
-                                nextStartTime = Math.max(prevCurrentTime + (prevPlayDuration * 0.2), nextStartTime);
-                                prevCurrentTime = nextStartTime;
-                            } else {
-                                // If previous was a PAUSE, just add its duration
-                                prevCurrentTime += prevSegmentDuration;
-                            }
-                        }
-                        
-                        // prevCurrentTime is the start time (in seconds) of the current segment (i)
-                        startIndex = Math.round(prevCurrentTime * sampleRate);
+                        return;
                     }
 
-
-                    const tempBuffer = new Float32Array(pitchedLength);
+                    // 1. Create source
+                    const source = offlineContext.createBufferSource();
+                    source.buffer = buffer;
                     
-                    // 3. Apply envelope and copy/mix the current segment's data
-                    for (let j = 0; j < pitchedLength; j++) {
-                        const currentWriteIndex = startIndex + j;
-                        const timeInSegment = j / sampleRate;
-                        
-                        // 3a. Pitch Shift Index
-                        const inputIndex = Math.floor(j * pitch);
+                    // 2. Apply Gain (for ADSR envelope)
+                    const gainNode = offlineContext.createGain();
+                    source.connect(gainNode);
+                    
+                    // 3. Connect to the Effects Chain
+                    // The result of the chain connects to the offlineContext.destination
+                    applyEffectsChain(offlineContext, gainNode, offlineContext.destination, currentTime, currentTime + segmentDuration);
 
-                        if (inputIndex < inputData.length) {
-                             // 3b. Apply Envelope Gain
-                            const gain = getEnvelopeGain(timeInSegment);
-                            const segmentValue = inputData[inputIndex] * gain;
-                            
-                            if (currentWriteIndex < frameCount) {
-                                
-                                // 3c. Crossfade Mixing (if overlapping)
-                                if (i > 0 && currentWriteIndex < currentFrame && crossfadeFrames > 0) {
-                                    // This is the overlap region. currentFrame is the end of the previous segment.
-                                    const overlapProgress = (currentWriteIndex - (currentFrame - crossfadeFrames)) / crossfadeFrames;
-                                    
-                                    // Mix the new segment (fades in) with the old segment (already in outputData, fades out)
-                                    // OutputData already contains the fading out previous segment
-                                    const fadeOutFactor = 1 - overlapProgress; // Prev sound fades out
-                                    const fadeInFactor = overlapProgress;       // Current sound fades in
+                    // 4. Pitch and Start
+                    source.playbackRate.value = pitch;
+                    source.start(currentTime, 0, buffer.duration);
+                    source.stop(currentTime + segmentDuration); 
 
-                                    outputData[currentWriteIndex] = 
-                                        (outputData[currentWriteIndex] * fadeOutFactor) + 
-                                        (segmentValue * fadeInFactor);
-                                } else {
-                                    // Standard copy region (non-overlapping)
-                                    outputData[currentWriteIndex] = segmentValue;
-                                }
-                            }
-                        }
+                    
+                    // 5. Implement Volume Envelope (Attack and Release)
+                    
+                    // Start with volume at 0
+                    gainNode.gain.setValueAtTime(0, currentTime); 
+                    
+                    // Attack (Fade In): Ramp to 1.0 over attackSeconds
+                    const attackEndTime = currentTime + attackSeconds;
+                    gainNode.gain.linearRampToValueAtTime(1.0, attackEndTime); 
+
+                    // Release (Fade Out): Ramp to 0.0 over releaseSeconds before the segment effectively ends
+                    const segmentPlayDuration = segmentDuration;
+                    const releaseStartTime = currentTime + segmentPlayDuration - releaseSeconds;
+
+                    if (releaseStartTime > attackEndTime) {
+                        gainNode.gain.setValueAtTime(1.0, releaseStartTime);
+                        gainNode.gain.linearRampToValueAtTime(0, currentTime + segmentPlayDuration);
+                    } else if (attackEndTime < currentTime + segmentPlayDuration) {
+                        gainNode.gain.linearRampToValueAtTime(0, currentTime + segmentPlayDuration);
+                    } else {
+                        gainNode.gain.linearRampToValueAtTime(0, currentTime + 0.01);
+                    }
+                    
+                    // 6. Crossfade Overlap (managed by simply starting the next sound early)
+                    // We only manage crossfade by controlling the start time of the NEXT segment.
+                    // The volume envelope handles the smooth exit of the CURRENT segment (Release).
+                    
+                    // 7. Calculate start time for the next sound (if not the last)
+                    if (index < buffersToPlay.length - 1) {
+                        currentTime = calculateNextStartTime(currentTime, index, buffersToPlay, pitchesToApply, nominalDurations, durations, delaySeconds, crossfadeSeconds);
                     }
 
-                    // 4. Update currentFrame to the start of the next potential segment.
-                    // Recalculate using the playing time logic for consistency
-                    let nextStartTime = startIndex / sampleRate; // Start time of this segment in seconds
-                    
-                    if (i < buffersToPlay.length - 1) {
-                         nextStartTime += segmentPlayDuration + delaySeconds - crossfadeSeconds;
-                    }
-                    nextStartTime = Math.max((startIndex / sampleRate) + (segmentPlayDuration * 0.2), nextStartTime); 
+                });
+                
+                // Start rendering
+                const renderedBuffer = await offlineContext.startRendering();
 
-                    currentFrame = Math.round(nextStartTime * sampleRate);
-                }
-                
-                // Final calculation of the frame count to handle the last segment's true end
-                const finalFrameCount = Math.ceil(totalDuration * sampleRate);
-                
-                // Re-create the AudioBuffer and copy only the utilized portion
-                const finalOutputBuffer = state.audioContext.createBuffer(numberOfChannels, finalFrameCount, sampleRate);
-                finalOutputBuffer.getChannelData(0).set(outputData.slice(0, finalFrameCount));
-                
                 // Convert the AudioBuffer to a WAV blob
-                const wavBlob = bufferToWav(finalOutputBuffer);
+                const wavBlob = bufferToWav(renderedBuffer);
 
                 // Create a download link
                 const url = URL.createObjectURL(wavBlob);
@@ -955,6 +1025,48 @@
                 state.isProcessing = false;
             }
         }
+        
+        /** Applies selected preset values to all sliders. */
+        function applyPreset(presetKey) {
+            const preset = PRESETS[presetKey];
+            if (!preset) return;
+
+            // Update sliders and value displays
+            document.getElementById('pitch-slider').value = preset.pitch;
+            document.getElementById('pitch-value').textContent = preset.pitch;
+
+            document.getElementById('delay-slider').value = preset.delay;
+            document.getElementById('delay-value').textContent = preset.delay;
+
+            document.getElementById('crossfade-slider').value = preset.crossfade;
+            document.getElementById('crossfade-value').textContent = preset.crossfade;
+
+            document.getElementById('pause-slider').value = preset.pause;
+            document.getElementById('pause-value').textContent = preset.pause;
+
+            document.getElementById('attack-slider').value = preset.attack;
+            document.getElementById('attack-value').textContent = preset.attack;
+            
+            document.getElementById('release-slider').value = preset.release;
+            document.getElementById('release-value').textContent = preset.release;
+
+            document.getElementById('pitch-variation').value = preset.variation;
+            document.getElementById('variation-value').textContent = preset.variation;
+            
+            // New FX sliders
+            document.getElementById('lpf-slider').value = preset.lpf;
+            document.getElementById('lpf-value').textContent = preset.lpf;
+            
+            document.getElementById('chorus-slider').value = preset.chorus;
+            document.getElementById('chorus-value').textContent = preset.chorus;
+            
+            document.getElementById('reverb-slider').value = preset.reverb;
+            document.getElementById('reverb-value').textContent = preset.reverb;
+
+
+            showMessage(`Preset "${presetKey.toUpperCase()}" loaded.`);
+        }
+
 
         // --- UI Rendering Function ---
 
@@ -1006,12 +1118,19 @@
         window.onload = () => {
             renderPhonemeUploadList();
             initializePhonemes();
+            applyPreset('default'); // Load default preset on startup
 
             document.getElementById('synth-button').addEventListener('click', () => playSynthesizedSpeech(false));
             document.getElementById('gibberish-play-button').addEventListener('click', () => playSynthesizedSpeech(true));
             document.getElementById('synth-download-button').addEventListener('click', () => downloadSynthesizedSpeech(false));
             document.getElementById('gibberish-download-button').addEventListener('click', () => downloadSynthesizedSpeech(true));
             
+            // Preset Listener
+            document.getElementById('preset-selector').addEventListener('change', (e) => {
+                applyPreset(e.target.value);
+            });
+
+
             // Workflow Buttons
             document.getElementById('clear-phonemes-button').addEventListener('click', () => {
                 const isConfirmed = confirm('Are you sure you want to clear all uploaded sounds? This cannot be undone.');
@@ -1051,6 +1170,17 @@
             document.getElementById('release-slider').addEventListener('input', (e) => {
                 document.getElementById('release-value').textContent = e.target.value;
             });
+            // New FX slider listeners
+            document.getElementById('lpf-slider').addEventListener('input', (e) => {
+                document.getElementById('lpf-value').textContent = e.target.value;
+            });
+            document.getElementById('chorus-slider').addEventListener('input', (e) => {
+                document.getElementById('chorus-value').textContent = e.target.value;
+            });
+            document.getElementById('reverb-slider').addEventListener('input', (e) => {
+                document.getElementById('reverb-value').textContent = e.target.value;
+            });
+
         };
     </script>
 </head>
@@ -1094,7 +1224,7 @@
             </div>
             
             <!-- Export/Import & Clear Buttons -->
-            <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mt-4">
                 <button id="export-phonemes-button" class="btn btn-secondary text-indigo-600 border border-indigo-300">
                     Export Voice (.json)
                 </button>
@@ -1104,8 +1234,9 @@
                     </label>
                     <input type="file" id="import-phonemes-file" accept="application/json" class="hidden" />
                 </div>
+                <button id="clear-phonemes-button" class="btn btn-secondary text-red-600 border border-red-300">Clear All Uploaded Sounds</button>
             </div>
-            <button id="clear-phonemes-button" class="mt-4 btn btn-secondary w-full text-red-600 border border-red-300">Clear All Uploaded Sounds (Local Storage)</button>
+
 
         </div>
 
@@ -1114,7 +1245,21 @@
             <h2 class="text-2xl font-bold mb-4 text-indigo-700">2. Synthesize Speech</h2>
             <textarea id="input-sentence" rows="3" placeholder="Type the sentence you want to synthesize here (e.g., 'Hello, world?')." class="mb-4"></textarea>
             
-            <!-- Controls Grid -->
+            <!-- Presets -->
+            <div class="mb-6">
+                 <label for="preset-selector" class="block text-sm font-medium text-gray-700 mb-1">Character Presets:</label>
+                 <select id="preset-selector" class="w-full">
+                     <option value="default">Default (Balanced)</option>
+                     <option value="robot">🤖 Robot (Low Pitch, Choppy)</option>
+                     <option value="child">👶 Child (High Pitch, Fast)</option>
+                     <option value="monster">👹 Monster (Deep, Reverberant)</option>
+                     <option value="radio">📻 Old Radio (Muffled, Filtered)</option>
+                 </select>
+            </div>
+
+
+            <h3 class="text-lg font-semibold text-gray-800 mb-2 mt-4 border-b pb-1">Timing & Rhythm Controls</h3>
+            <!-- Timing Controls Grid -->
             <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
                 <!-- Base Pitch -->
                 <div>
@@ -1146,8 +1291,9 @@
                 </div>
             </div>
 
+            <h3 class="text-lg font-semibold text-gray-800 mb-2 mt-4 border-b pb-1">Envelope & Gibberish Controls</h3>
             <!-- Envelope Controls Grid -->
-            <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6 pt-4 border-t">
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
                  <!-- Attack Duration -->
                 <div>
                     <label for="attack-slider" class="block text-sm font-medium text-gray-700 mb-1">
@@ -1168,6 +1314,32 @@
                         Gibberish Pitch Variation (+/-): (<span id="variation-value">0.3</span>x)
                     </label>
                     <input type="range" id="pitch-variation" min="0.0" max="1.0" step="0.05" value="0.3" class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer range-lg" />
+                </div>
+            </div>
+            
+            <h3 class="text-lg font-semibold text-gray-800 mb-2 mt-4 border-b pb-1">Character FX Chain</h3>
+            <!-- FX Controls Grid -->
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+                 <!-- LPF Cutoff -->
+                <div>
+                    <label for="lpf-slider" class="block text-sm font-medium text-gray-700 mb-1">
+                        LPF Cutoff (Muffle): (<span id="lpf-value">20000</span> Hz)
+                    </label>
+                    <input type="range" id="lpf-slider" min="1000" max="20000" step="100" value="20000" class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer range-lg" />
+                </div>
+                <!-- Chorus Depth -->
+                <div>
+                    <label for="chorus-slider" class="block text-sm font-medium text-gray-700 mb-1">
+                        Chorus Depth (Robotic Wobble): (<span id="chorus-value">0.0</span>)
+                    </label>
+                    <input type="range" id="chorus-slider" min="0.0" max="1.0" step="0.1" value="0.0" class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer range-lg" />
+                </div>
+                <!-- Reverb/Echo -->
+                <div>
+                    <label for="reverb-slider" class="block text-sm font-medium text-gray-700 mb-1">
+                        Reverb/Echo Depth: (<span id="reverb-value">0.0</span>)
+                    </label>
+                    <input type="range" id="reverb-slider" min="0.0" max="1.0" step="0.1" value="0.0" class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer range-lg" />
                 </div>
             </div>
 
